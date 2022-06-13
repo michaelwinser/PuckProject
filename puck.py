@@ -1,75 +1,68 @@
-# Write your code here :-)
 import tinys3
 import time
-import random
-import wifi
-import socketpool
-import adafruit_requests
-from secrets import secrets
-import ssl
-import ipaddress
 import alarm
 import board
+import analogio
+import digitalio
+import puck_logging
+import puck_network
 
-def connect_wifi():
-    wifi.radio.enabled = True
-    wifi.radio.connect(secrets["ssid"], secrets["password"])
-    print(wifi.radio.ipv4_address)
-    return
+water_enable = digitalio.DigitalInOut(board.A0)
+water_enable.switch_to_output()
+water_sensor = analogio.AnalogIn(board.A1)
 
-def disconnect_wifi():
-    wifi.radio.enabled = False
-    return
+voltage = None
+water_level = None
 
-def report_status(voltage, water_detected):
-    connect_wifi()
-    pool = socketpool.SocketPool(wifi.radio)
-    requests = adafruit_requests.Session(pool, ssl.create_default_context())
-    report = f"Battery voltage is {voltage}v. {water_detected if 'Water detected.' else 'No water detected.'}"
-    print(report)
-    try:
-        response = requests.post("http://michaelwmac:3030/", data=report)
-        print(response.text)
-        response.close()
-    except RuntimeError as e:
-        print(e)
-    disconnect_wifi()
+log = puck_logging.getLogger()
+
+def setup():
+    log.info("setup")
+
+    puck_network.connect_wifi()
+
+    puck_network.post("http://michaelwmac:3030", "setup")
+
+
+def main_loop():
+    while True:
+        voltage = get_battery_voltage()
+        water_level = get_water_level()
+
+        report = f"voltage = {voltage}, water level = {water_level}"
+
+        log.info(report)
+
+        if voltage < 2.9 or water_level > 10000:
+            try:
+                puck_network.connect_wifi()
+                puck_network.post("http://michaelwmac:3030/", report)
+            except RuntimeError as e:
+                puck_network.disconnect_wifi()
+                log.error(e)
+
+        time.sleep(2)
+
 
 def deep_sleep(t):
     time_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + t)
     pin_alarm = alarm.pin.PinAlarm(pin=board.IO0, value=False, pull=True)
     alarm.exit_and_deep_sleep_until_alarms(time_alarm, pin_alarm)
     return
+
 # returns [battery_is_low, battery_voltage]
-def check_battery():
-    voltage = tinys3.get_battery_voltage()
-    s = f"{voltage},{time.monotonic()}\n"
-    print(s)
-    try:
-        with open("/batterylog.txt", "a") as fp:
-            fp.write(s)
+def get_battery_voltage():
+    return tinys3.get_battery_voltage()
 
-    except OSError as e:
-        print(e)
-    return voltage
+def get_water_level():
+    total = 0
+    count = 5
+    water_enable.value = True
+    for count in range(1, count):
+        total = total + water_sensor.value
+        time.sleep(0.01)
 
-# returns True if water detected
-def check_water_sensor():
-    return random.random() < 0.5
+    water_enable.value = False
 
-
-def main_loop():
-    print("I'm Alive")
-    report_status(0, False)
-    while True:
-        voltage = check_battery()
-        water_detected = check_water_sensor()
-
-        if voltage < 2.9 or water_detected:
-            report_status(voltage, water_detected);
-
-        print("Going to sleep")
-        # deep_sleep(1)
-        time.sleep(1)
-
+    return total / count
 
